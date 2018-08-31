@@ -26,7 +26,9 @@ os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # use specific GPU
 
 
-
+from datetime import datetime
+current_time = datetime.now().strftime('%b%d_%H-%M-%S')
+if(USEBOARD):writer = SummaryWriter(log_dir='../conditioned-wavenet/runs/'+str(current_time)+'deltacifar10resnet',comment="uwavenet")
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 best_acc = 0  # best test accuracy
@@ -46,8 +48,8 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform_train)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=True, num_workers=4)
+trainset = torchvision.datasets.CIFAR10(root='./data', train=True, download=False, transform=transform_train)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=128, shuffle=False, num_workers=4)
 
 testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform_test)
 testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=4)
@@ -55,11 +57,21 @@ testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False,
 classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
 
 
-net = ResNet()
+net = ResNet(10)
 net = net.to(device)
+
+sds_ = [torch.zeros(param.shape,device='cuda') for param in net.parameters() if param.requires_grad]
+cnt=0
+for param in net.parameters():
+    if param.requires_grad:
+        dist = torch.distributions.normal.Normal(loc=param, scale=sds_[cnt])
+        param.data=(dist.sample().view(param.shape)).clone()
+        cnt += 1
+
 if device == 'cuda':
-    net = torch.nn.DataParallel(net)
+    #net = torch.nn.DataParallel(net)
     cudnn.benchmark = True
+
 
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(net.parameters(), lr=0.1, momentum=0.9, weight_decay=5e-4)
@@ -93,7 +105,29 @@ def train(epoch):
         optimizer.zero_grad()
         outputs = net(inputs)
         loss = criterion(outputs, targets)
+        #############delta rule
+        cnt = 0
+        #print(sds_[cnt][0])
+        for param in net.parameters():
+            if param.requires_grad:
+                dist = torch.distributions.normal.Normal(loc=param.data, scale=sds_[cnt])
+                #dist = torch.distributions.normal.Normal(loc=torch.zeros(sds_[cnt].shape).to('cuda'), scale=sds_[cnt])
+                param.data=(dist.sample().view(param.shape)).clone()
+                cnt += 1
+        #############
+
         loss.backward()
+
+        ###########################################
+        cnt = 0
+        for param in net.parameters():
+            if param.requires_grad:
+                sds_[cnt]=(0.1*(sds_[cnt]+torch.abs(param.grad.data)*0.1)).clone()
+                cnt += 1
+        ##############################################33
+
+
+
         optimizer.step()
 
         train_loss += loss.item()
@@ -103,8 +137,11 @@ def train(epoch):
         global iteration
         iteration += 1
 
-        print(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+    print('train Loss: %.3f | Acc: %.3f%% (%d/%d)'
+        % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+    if (USEBOARD):
+        writer.add_scalar('train resnet acc', 100.*correct/total, iteration)
+        writer.add_scalar('train resnet loss', float(loss),iteration)
 
 def test(epoch):
     global best_acc
@@ -123,12 +160,15 @@ def test(epoch):
             total += targets.size(0)
             correct += predicted.eq(targets).sum().item()
 
-            print(batch_idx, len(testloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
+        print('test Loss: %.3f | Acc: %.3f%% (%d/%d)'
                 % (test_loss/(batch_idx+1), 100.*correct/total, correct, total))
 
     # Save checkpoint.
     acc = 100.*correct/total
-    if (USEBOARD): writer.add_scalar('resnet acc', acc, epoch)
+    if (USEBOARD):
+        writer.add_scalar('test resnet acc', 100. * correct / total, epoch)
+        writer.add_scalar('test resnet loss', test_loss/(batch_idx+1), epoch)
+
     if acc > best_acc:
         print('Saving..')
         if not os.path.isdir('checkpoint'):
